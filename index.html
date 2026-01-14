@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sea Ice Animation</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.114/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: Arial, sans-serif;
+            background-color: black;
+            color: white;
+        }
+        #content-container {
+            display: flex;
+            flex-direction: row;
+            width: 100%;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        #cesiumContainer {
+            width: 50%; height: 65vh; margin: 50px 0 20px;
+            position: relative;
+        }
+        #chart-container {
+            width: 50%; display: flex; justify-content: center; align-items: center; padding: 20px;margin: 50px 0 20px;
+        }
+        #chart-container canvas { width: 100% !important; height: 65vh !important; }
+        #controls {
+            margin-top: 0px;
+            text-align: center;
+            width: 100%;
+        }
+        #basemapSelector {
+            margin-top: 10px;
+            font-size: 16px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 5px;
+            background-color: white;
+            color: black;
+            border: none;
+            cursor: pointer;
+        }
+        #yearLabel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 28px;
+            font-weight: bold;
+            color: white;
+            background-color: rgba(0, 0, 0, 0.4);
+            padding: 4px 10px;
+            border-radius: 6px;
+            z-index: 10;
+            pointer-events: none;
+        }
+        #logoImage {
+            position: absolute;
+            bottom: 0px;
+            right: 30px;
+            z-index: 10;
+        }
+        #logoImage img {
+            height: 40px;
+        }
+    </style>
+</head>
+<body>
+    <div id="content-container">
+        <div id="cesiumContainer">
+            <div id="yearLabel"></div>
+            <a id="logoImage" href="https://www.ncdr.nat.gov.tw/" target="_blank">
+                <img src="logo-white.png" alt="國家災害防救科技中心">
+            </a>
+        </div>
+        <div id="chart-container">
+            <canvas id="seaIceChart"></canvas>
+        </div>
+    </div>
+    <div id="controls">
+        <label for="basemapSelector">地球底圖：</label>
+        <select id="basemapSelector">
+            <option value="bing">Bing Maps Aerial</option>
+            <option value="naturalEarth">Natural Earth II</option>
+            <option value="osm">Carto Dark Matter</option>
+        </select>
+        <label for="speedRange">每幅間隔時間：</label>
+        <input type="range" id="speedRange" min="100" max="1000" step="100" value="500" onchange="updateSpeed(this.value)">
+        <span id="speedValue">500</span> ms 
+        <br>
+        <button onclick="prevFrame()">上一年</button>
+        <button id="playPauseButton" onclick="togglePlay()">暫停</button>
+        <button onclick="nextFrame()">下一年</button>
+    </div>
+
+    <script>
+        Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIyZjI0NDZjYS02YjRlLTRkNzQtOTkyMi1lMTllN2U0NTdjOWIiLCJpZCI6Mjg5NDQwLCJpYXQiOjE3NDM0MTExNTl9.YipWOIxM9T1BTJ89miUOM9NUQu8IVYUpE8NPxDzh0r8';
+
+        const years = [...Array(40).keys()].map(i => 1985 + i);
+        const anomalyData = [
+            0.17, 0.29, 0.31, 0.27, 0.19, 0.07, 0.1, 0.3, 0.07, 0.24,
+            0.05, 0.32, 0.17, 0.13, 0.08, 0.1, 0.18, 0.06, 0.07, 0.05,
+            0.00, 0.03, -0.27, -0.19, -0.04, -0.14, -0.18, -0.41, -0.08, -0.09,
+            -0.19, -0.24, -0.2, -0.12, -0.2, -0.3, -0.08, -0.12, -0.21, -0.19
+        ];
+        const months = ["09"];
+        const framesPerYear = months.length;
+        const frames = years.flatMap(year =>
+            months.map(month => ({
+                year,
+                month,
+                yearIndex: years.indexOf(year),
+                url: `cesium_tiles/sic_${year}_${month}.png`
+            }))
+        );
+
+        let currentIndex = 0;
+        let playing = false;
+        let interval;
+        let playbackSpeed = 500;
+        let imageryLayer;
+        let fadeRaf;
+        let fadeDurationMs = 60;
+        let frameRequestId = 0;
+        let fadingOutLayer;
+        const preloadedImages = new Map();
+
+        function computeFadeDuration(ms) {
+            return Math.max(30, Math.min(220, Math.round(ms * 0.55)));
+        }
+
+        function updateSpeed(val) {
+            playbackSpeed = parseInt(val);
+            fadeDurationMs = computeFadeDuration(playbackSpeed);
+            document.getElementById('speedValue').innerText = val;
+            if (playing) {
+                clearInterval(interval);
+                interval = setInterval(() => {
+                    nextFrame();
+                }, playbackSpeed);
+            }
+        }
+
+        const viewer = new Cesium.Viewer('cesiumContainer', {
+            baseLayerPicker: false,
+            animation: false,
+            timeline: false,
+            homeButton: false,
+            sceneModePicker: false,
+            geocoder: false
+        });
+
+        const baseLayers = {
+            "bing": () => Cesium.IonImageryProvider.fromAssetId(2),
+            "naturalEarth": () => Promise.resolve(new Cesium.UrlTemplateImageryProvider({
+                url: 'https://services.arcgisonline.com/arcgis/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}',
+                credit: 'Esri'
+            })),
+            "osm": () => Promise.resolve(new Cesium.UrlTemplateImageryProvider({
+                url: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+                credit: '©CartoDB Dark Matter'
+            }))
+        };
+
+        async function setBaseLayer(type) {
+            while (viewer.imageryLayers.length > 0) {
+                viewer.imageryLayers.remove(viewer.imageryLayers.get(0), true);
+            }
+            const provider = await baseLayers[type]();
+            viewer.imageryLayers.addImageryProvider(provider);
+            updateCesiumLayer(currentIndex);
+        }
+
+        document.getElementById("basemapSelector").addEventListener("change", e => {
+            setBaseLayer(e.target.value);
+        });
+
+        Cesium.CesiumTerrainProvider.fromIonAssetId(1).then(terrain => {
+            viewer.terrainProvider = terrain;
+        });
+
+        viewer.camera.flyTo({
+            destination: Cesium.Cartesian3.fromDegrees(-145, 70, 3555000),
+            orientation: {
+                heading: Cesium.Math.toRadians(0),
+                pitch: Cesium.Math.toRadians(-65),
+                roll: 0
+            }
+        });
+
+        const ctx = document.getElementById("seaIceChart").getContext("2d");
+        const seaIceChart = new Chart(ctx, {
+            type: "bar",
+            data: {
+                labels: years,
+                datasets: [{
+                    label: "海冰面積變化率(相對於1985~2024年平均)",
+                    data: new Array(years.length).fill(null),
+                    backgroundColor: anomalyData.map(v => v >= 0 ? "blue" : "red")
+                }]
+            },
+            options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    min: -0.5,
+                    max: 0.4,
+                    title: {
+                        display: true,
+                        text: "變化率",
+                        font: { size: 16 },
+                        color: "white"
+                    },
+                    ticks: {
+                        font: { size: 16 },
+                        color: "white"
+                    }
+                },
+                x: {
+                    ticks: {
+                        font: { size: 14 },
+                        color: "white"
+                    }
+                }
+            },
+            plugins: {
+                legend: {
+                    display: false  // ❌ 不顯示圖例
+                },
+                title: {
+                    display: true,
+                    text: "北極海冰面積變化率",
+                    font: { size: 36 },
+                    color: "white"
+                },
+                subtitle: {
+                    display: true,
+                    text: "(相較於1985~2024年平均)",
+                    font: { size: 24 },
+                    color: "white"
+                }
+            },
+                onHover: (event, chartElement) => {
+                    if (!playing && chartElement.length > 0) {
+                        const index = chartElement[0].index;
+                        const dataset = seaIceChart.data.datasets[0];
+                        const colors = anomalyData.map((v, i) => i === index ? "yellow" : v >= 0 ? "blue" : "red");
+                        dataset.backgroundColor = colors;
+                        seaIceChart.update();
+                        currentIndex = index * framesPerYear;
+                        updateCesiumLayer(currentIndex);
+                        updateYearLabel(currentIndex);
+                    }
+                },
+           }
+        });
+
+        function updateYearLabel(index) {
+            const frame = frames[index];
+            document.getElementById("yearLabel").textContent = `${frame.year}-${frame.month}`;
+        }
+
+        function preloadImage(url) {
+            if (preloadedImages.has(url)) return;
+            const img = new Image();
+            img.src = url;
+            preloadedImages.set(url, img);
+            if (typeof img.decode === "function") {
+                img.decode().catch(() => {});
+            }
+        }
+
+        function preloadBatch(startIndex, batchSize = 4, delayMs = 50) {
+            let i = startIndex;
+            const step = () => {
+                for (let n = 0; n < batchSize && i < frames.length; n++, i++) {
+                    preloadImage(frames[i].url);
+                }
+                if (i < frames.length) {
+                    setTimeout(step, delayMs);
+                }
+            };
+            step();
+        }
+
+        function preloadAround(index, range = 6) {
+            const start = Math.max(0, index);
+            const end = Math.min(frames.length - 1, index + range);
+            for (let i = start; i <= end; i++) {
+                preloadImage(frames[i].url);
+            }
+        }
+
+        function ensureImageReady(url) {
+            const existing = preloadedImages.get(url);
+            if (existing && existing.complete && existing.naturalWidth > 0) {
+                return Promise.resolve();
+            }
+            return new Promise(resolve => {
+                const img = existing || new Image();
+                if (!existing) {
+                    img.src = url;
+                    preloadedImages.set(url, img);
+                }
+                if (img.complete && img.naturalWidth > 0) {
+                    resolve();
+                } else {
+                    img.onload = () => resolve();
+                    img.onerror = () => resolve();
+                }
+            });
+        }
+
+        function updateCesiumLayer(index) {
+            const url = frames[index].url;
+            const requestId = ++frameRequestId;
+
+            ensureImageReady(url).then(() => {
+                if (requestId !== frameRequestId) return;
+
+                if (fadeRaf) {
+                    cancelAnimationFrame(fadeRaf);
+                    fadeRaf = null;
+                }
+                if (imageryLayer) {
+                    imageryLayer.alpha = 1.0;
+                }
+                if (fadingOutLayer && fadingOutLayer !== imageryLayer) {
+                    viewer.imageryLayers.remove(fadingOutLayer);
+                    fadingOutLayer = null;
+                }
+
+                const newLayer = viewer.imageryLayers.addImageryProvider(
+                    new Cesium.SingleTileImageryProvider({
+                        url,
+                        rectangle: Cesium.Rectangle.fromDegrees(-180, -90, 180, 90)
+                    })
+                );
+
+                newLayer.alpha = 0.0;
+                const oldLayer = imageryLayer;
+                imageryLayer = newLayer;
+                fadingOutLayer = oldLayer;
+
+                const start = performance.now();
+                const step = (now) => {
+                    const t = Math.min(1, (now - start) / fadeDurationMs);
+                    newLayer.alpha = t;
+                    if (oldLayer) {
+                        oldLayer.alpha = 1 - t;
+                    }
+                    if (t < 1) {
+                        fadeRaf = requestAnimationFrame(step);
+                    } else if (oldLayer) {
+                        viewer.imageryLayers.remove(oldLayer);
+                        if (fadingOutLayer === oldLayer) {
+                            fadingOutLayer = null;
+                        }
+                    }
+                };
+
+                fadeRaf = requestAnimationFrame(step);
+            });
+        }
+
+
+
+        function renderChartToYear(yearIndex) {
+            seaIceChart.data.datasets[0].data.fill(null);
+            for (let i = 0; i <= yearIndex; i++) {
+                seaIceChart.data.datasets[0].data[i] = anomalyData[i];
+            }
+            seaIceChart.data.datasets[0].backgroundColor = anomalyData.map(v => v >= 0 ? "blue" : "red");
+            seaIceChart.update();
+        }
+
+        function showFrame(index) {
+            const yearIndex = frames[index].yearIndex;
+            updateCesiumLayer(index);
+            renderChartToYear(yearIndex);
+            updateYearLabel(index);
+            preloadAround(index);
+        }
+
+        function nextFrame() {
+            if (currentIndex < frames.length - 1) {
+                currentIndex++;
+            } else {
+                currentIndex = 0; // 循環
+            }
+            showFrame(currentIndex);
+        }
+
+
+        function prevFrame() {
+            if (currentIndex > 0) {
+                currentIndex--;
+                showFrame(currentIndex);
+            }
+        }
+
+        function togglePlay() {
+            if (playing) {
+                clearInterval(interval);
+                playing = false;
+                document.getElementById("playPauseButton").innerText = "播放";
+            } else {
+                if (currentIndex >= frames.length - 1) {
+                    currentIndex = 0;
+                    seaIceChart.data.datasets[0].data.fill(null);
+                }
+                playing = true;
+                document.getElementById("playPauseButton").innerText = "暫停";
+                interval = setInterval(() => {
+                    nextFrame();
+                }, playbackSpeed);
+            }
+        }
+
+        window.onload = () => {
+            setBaseLayer("bing");
+            showFrame(currentIndex);
+            preloadBatch(0);
+            updateSpeed(playbackSpeed);
+            togglePlay();
+        };
+    </script>
+    <div style="position: fixed; bottom: 5px; right: 10px; z-index: 20; color: white; font-size: 14px;">
+        資料來源：
+        <a href="https://svs.gsfc.nasa.gov/5395/" target="_blank" style="color: lightblue;">
+            NASA/Goddard Space Flight Center
+        </a>
+    </div>
+</body>
+</html>
+
