@@ -94,8 +94,8 @@
             <option value="osm">Carto Dark Matter</option>
         </select>
         <label for="speedRange">每幅間隔時間：</label>
-        <input type="range" id="speedRange" min="100" max="1000" step="100" value="500" onchange="updateSpeed(this.value)">
-        <span id="speedValue">500</span> ms 
+        <input type="range" id="speedRange" min="500" max="1500" step="100" value="1000" onchange="updateSpeed(this.value)">
+        <span id="speedValue">1000</span> ms 
         <br>
         <button onclick="prevFrame()">上一年</button>
         <button id="playPauseButton" onclick="togglePlay()">暫停</button>
@@ -105,28 +105,15 @@
     <script>
         Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIyZjI0NDZjYS02YjRlLTRkNzQtOTkyMi1lMTllN2U0NTdjOWIiLCJpZCI6Mjg5NDQwLCJpYXQiOjE3NDM0MTExNTl9.YipWOIxM9T1BTJ89miUOM9NUQu8IVYUpE8NPxDzh0r8';
 
-        const years = [...Array(40).keys()].map(i => 1985 + i);
-        const anomalyData = [
-            0.17, 0.29, 0.31, 0.27, 0.19, 0.07, 0.1, 0.3, 0.07, 0.24,
-            0.05, 0.32, 0.17, 0.13, 0.08, 0.1, 0.18, 0.06, 0.07, 0.05,
-            0.00, 0.03, -0.27, -0.19, -0.04, -0.14, -0.18, -0.41, -0.08, -0.09,
-            -0.19, -0.24, -0.2, -0.12, -0.2, -0.3, -0.08, -0.12, -0.21, -0.19
-        ];
-        const months = ["09"];
-        const framesPerYear = months.length;
-        const frames = years.flatMap(year =>
-            months.map(month => ({
-                year,
-                month,
-                yearIndex: years.indexOf(year),
-                url: `cesium_tiles/sic_${year}_${month}.png`
-            }))
-        );
+        let years = [];
+        let anomalyData = [];
+        let frames = [];
+        const framesPerYear = 1;
 
         let currentIndex = 0;
         let playing = false;
         let interval;
-        let playbackSpeed = 500;
+        let playbackSpeed = 1000;
         let imageryLayer;
         let fadeRaf;
         let fadeDurationMs = 60;
@@ -197,77 +184,11 @@
             }
         });
 
-        const ctx = document.getElementById("seaIceChart").getContext("2d");
-        const seaIceChart = new Chart(ctx, {
-            type: "bar",
-            data: {
-                labels: years,
-                datasets: [{
-                    label: "海冰面積變化率(相對於1985~2024年平均)",
-                    data: new Array(years.length).fill(null),
-                    backgroundColor: anomalyData.map(v => v >= 0 ? "blue" : "red")
-                }]
-            },
-            options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: {
-                y: {
-                    min: -0.5,
-                    max: 0.4,
-                    title: {
-                        display: true,
-                        text: "變化率",
-                        font: { size: 16 },
-                        color: "white"
-                    },
-                    ticks: {
-                        font: { size: 16 },
-                        color: "white"
-                    }
-                },
-                x: {
-                    ticks: {
-                        font: { size: 14 },
-                        color: "white"
-                    }
-                }
-            },
-            plugins: {
-                legend: {
-                    display: false  // ❌ 不顯示圖例
-                },
-                title: {
-                    display: true,
-                    text: "北極海冰面積變化率",
-                    font: { size: 36 },
-                    color: "white"
-                },
-                subtitle: {
-                    display: true,
-                    text: "(相較於1985~2024年平均)",
-                    font: { size: 24 },
-                    color: "white"
-                }
-            },
-                onHover: (event, chartElement) => {
-                    if (!playing && chartElement.length > 0) {
-                        const index = chartElement[0].index;
-                        const dataset = seaIceChart.data.datasets[0];
-                        const colors = anomalyData.map((v, i) => i === index ? "yellow" : v >= 0 ? "blue" : "red");
-                        dataset.backgroundColor = colors;
-                        seaIceChart.update();
-                        currentIndex = index * framesPerYear;
-                        updateCesiumLayer(currentIndex);
-                        updateYearLabel(currentIndex);
-                    }
-                },
-           }
-        });
+        let seaIceChart;
 
         function updateYearLabel(index) {
             const frame = frames[index];
-            document.getElementById("yearLabel").textContent = `${frame.year}-${frame.month}`;
+            document.getElementById("yearLabel").textContent = `${frame.year}-JJA`;
         }
 
         function preloadImage(url) {
@@ -427,12 +348,94 @@
             }
         }
 
-        window.onload = () => {
+        async function init() {
+            const response = await fetch("anomaly.json");
+            const data = await response.json();
+            years = Object.keys(data).map(Number);
+            anomalyData = years.map(year => data[year]);
+            frames = years.map((year, yearIndex) => ({
+                year,
+                yearIndex,
+                url: `cesium_tiles/sic_${year}_jja.png`
+            }));
+
+            const ctx = document.getElementById("seaIceChart").getContext("2d");
+            seaIceChart = new Chart(ctx, {
+                type: "bar",
+                data: {
+                    labels: years,
+                    datasets: [{
+                        label: "海冰面積變化率(相對於1985~2024年平均)",
+                        data: new Array(years.length).fill(null),
+                        backgroundColor: anomalyData.map(v => v >= 0 ? "blue" : "red")
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            min: -0.1,
+                            max: 0.1,
+                            title: {
+                                display: true,
+                                text: "變化率",
+                                font: { size: 16 },
+                                color: "white"
+                            },
+                            ticks: {
+                                font: { size: 16 },
+                                color: "white"
+                            }
+                        },
+                        x: {
+                            ticks: {
+                                font: { size: 14 },
+                                color: "white"
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false  // ❌ 不顯示圖例
+                        },
+                        title: {
+                            display: true,
+                            text: "北極海冰面積變化率",
+                            font: { size: 36 },
+                            color: "white"
+                        },
+                        subtitle: {
+                            display: true,
+                            text: "(相較於1985~2024年平均)",
+                            font: { size: 24 },
+                            color: "white"
+                        }
+                    },
+                    onHover: (event, chartElement) => {
+                        if (!playing && chartElement.length > 0) {
+                            const index = chartElement[0].index;
+                            const dataset = seaIceChart.data.datasets[0];
+                            const colors = anomalyData.map((v, i) => i === index ? "yellow" : v >= 0 ? "blue" : "red");
+                            dataset.backgroundColor = colors;
+                            seaIceChart.update();
+                            currentIndex = index * framesPerYear;
+                            updateCesiumLayer(currentIndex);
+                            updateYearLabel(currentIndex);
+                        }
+                    }
+                }
+            });
+
             setBaseLayer("bing");
             showFrame(currentIndex);
             preloadBatch(0);
             updateSpeed(playbackSpeed);
             togglePlay();
+        }
+
+        window.onload = () => {
+            init();
         };
     </script>
     <div style="position: fixed; bottom: 5px; right: 10px; z-index: 20; color: white; font-size: 14px;">
