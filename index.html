@@ -87,6 +87,25 @@
         </div>
     </div>
     <div id="controls">
+        <label for="periodSelector">展示時間：</label>
+        <select id="periodSelector">
+            <option value="season:MAM">春 (MAM)</option>
+            <option value="season:JJA">夏 (JJA)</option>
+            <option value="season:SON">秋 (SON)</option>
+            <option value="season:DJF">冬 (DJF)</option>
+            <option value="month:01">1月</option>
+            <option value="month:02">2月</option>
+            <option value="month:03">3月</option>
+            <option value="month:04">4月</option>
+            <option value="month:05">5月</option>
+            <option value="month:06">6月</option>
+            <option value="month:07">7月</option>
+            <option value="month:08">8月</option>
+            <option value="month:09" selected>9月</option>
+            <option value="month:10">10月</option>
+            <option value="month:11">11月</option>
+            <option value="month:12">12月</option>
+        </select>
         <label for="basemapSelector">地球底圖：</label>
         <select id="basemapSelector">
             <option value="bing">Bing Maps Aerial</option>
@@ -109,6 +128,14 @@
         let anomalyData = [];
         let frames = [];
         const framesPerYear = 1;
+        let selectedPeriodType = "month";
+        let selectedPeriodValue = "09";
+        const seasonLabels = {
+            MAM: "春",
+            JJA: "夏",
+            SON: "秋",
+            DJF: "冬"
+        };
 
         let currentIndex = 0;
         let playing = false;
@@ -171,6 +198,24 @@
             setBaseLayer(e.target.value);
         });
 
+        document.getElementById("periodSelector").addEventListener("change", async e => {
+            const { type, value } = parsePeriod(e.target.value);
+            selectedPeriodType = type;
+            selectedPeriodValue = value;
+            frames = buildFrames(type, value);
+            currentIndex = Math.min(currentIndex, frames.length - 1);
+            updateYearLabel(currentIndex);
+            showFrame(currentIndex);
+            preloadBatch(0);
+            try {
+                await loadAnomalyData(`cesium_tiles/anomaly_${value}.json`);
+                updateChartScale();
+                renderChartToYear(frames[currentIndex].yearIndex);
+            } catch (error) {
+                console.warn(error);
+            }
+        });
+
         Cesium.CesiumTerrainProvider.fromIonAssetId(1).then(terrain => {
             viewer.terrainProvider = terrain;
         });
@@ -188,7 +233,74 @@
 
         function updateYearLabel(index) {
             const frame = frames[index];
-            document.getElementById("yearLabel").textContent = `${frame.year}-JJA`;
+            if (selectedPeriodType === "season") {
+                const seasonLabel = seasonLabels[selectedPeriodValue] || selectedPeriodValue;
+                document.getElementById("yearLabel").textContent = `${frame.year}-${seasonLabel}`;
+            } else {
+                document.getElementById("yearLabel").textContent = `${frame.year}-${selectedPeriodValue}`;
+            }
+        }
+
+        function parsePeriod(rawValue) {
+            const parts = rawValue.split(":");
+            return { type: parts[0], value: parts[1] };
+        }
+
+        function buildFrames(type, value) {
+            if (type === "season") {
+                return years.map((year, yearIndex) => ({
+                    year,
+                    yearIndex,
+                    season: value,
+                    url: `cesium_tiles/sic_${year}_${value}.png`
+                }));
+            }
+            return years.map((year, yearIndex) => ({
+                year,
+                yearIndex,
+                month: value,
+                url: `cesium_tiles/sic_${year}_${value}.png`
+            }));
+        }
+
+        function anomalyColor(value) {
+            if (typeof value !== "number" || Number.isNaN(value)) return "gray";
+            return value >= 0 ? "blue" : "red";
+        }
+
+        function updateChartScale() {
+            const values = anomalyData.filter(v => typeof v === "number" && !Number.isNaN(v));
+            if (values.length === 0) {
+                seaIceChart.options.scales.y.min = -1;
+                seaIceChart.options.scales.y.max = 1;
+                return;
+            }
+            let min = Math.min(...values);
+            let max = Math.max(...values);
+            if (min === max) {
+                const pad = Math.abs(min) * 0.1 || 0.1;
+                min -= pad;
+                max += pad;
+            } else {
+                const pad = (max - min) * 0.1;
+                min -= pad;
+                max += pad;
+            }
+            seaIceChart.options.scales.y.min = min;
+            seaIceChart.options.scales.y.max = max;
+        }
+
+        async function loadAnomalyData(path) {
+            const response = await fetch(path);
+            if (!response.ok) {
+                throw new Error(`Failed to load ${path}`);
+            }
+            const data = await response.json();
+            const loadedYears = Object.keys(data).map(Number).sort((a, b) => a - b);
+            if (years.length === 0) {
+                years = loadedYears;
+            }
+            anomalyData = years.map(year => data[String(year)] ?? null);
         }
 
         function preloadImage(url) {
@@ -301,7 +413,7 @@
             for (let i = 0; i <= yearIndex; i++) {
                 seaIceChart.data.datasets[0].data[i] = anomalyData[i];
             }
-            seaIceChart.data.datasets[0].backgroundColor = anomalyData.map(v => v >= 0 ? "blue" : "red");
+            seaIceChart.data.datasets[0].backgroundColor = anomalyData.map(anomalyColor);
             seaIceChart.update();
         }
 
@@ -349,15 +461,21 @@
         }
 
         async function init() {
-            const response = await fetch("anomaly.json");
-            const data = await response.json();
-            years = Object.keys(data).map(Number);
-            anomalyData = years.map(year => data[year]);
-            frames = years.map((year, yearIndex) => ({
-                year,
-                yearIndex,
-                url: `cesium_tiles/sic_${year}_jja.png`
-            }));
+            const { type, value } = parsePeriod(document.getElementById("periodSelector").value);
+            selectedPeriodType = type;
+            selectedPeriodValue = value;
+
+            try {
+                await loadAnomalyData(`cesium_tiles/anomaly_${value}.json`);
+            } catch (error) {
+                console.warn(error);
+            }
+
+            if (years.length === 0) {
+                return;
+            }
+
+            frames = buildFrames(type, value);
 
             const ctx = document.getElementById("seaIceChart").getContext("2d");
             seaIceChart = new Chart(ctx, {
@@ -367,7 +485,7 @@
                     datasets: [{
                         label: "海冰面積變化率(相對於1985~2024年平均)",
                         data: new Array(years.length).fill(null),
-                        backgroundColor: anomalyData.map(v => v >= 0 ? "blue" : "red")
+                        backgroundColor: anomalyData.map(anomalyColor)
                     }]
                 },
                 options: {
@@ -375,8 +493,8 @@
                     maintainAspectRatio: false,
                     scales: {
                         y: {
-                            min: -0.1,
-                            max: 0.1,
+                            min: -1,
+                            max: 1,
                             title: {
                                 display: true,
                                 text: "變化率",
@@ -385,7 +503,8 @@
                             },
                             ticks: {
                                 font: { size: 16 },
-                                color: "white"
+                                color: "white",
+                                callback: (value) => Number(value).toFixed(2)
                             }
                         },
                         x: {
@@ -416,7 +535,7 @@
                         if (!playing && chartElement.length > 0) {
                             const index = chartElement[0].index;
                             const dataset = seaIceChart.data.datasets[0];
-                            const colors = anomalyData.map((v, i) => i === index ? "yellow" : v >= 0 ? "blue" : "red");
+                            const colors = anomalyData.map((v, i) => i === index ? "yellow" : anomalyColor(v));
                             dataset.backgroundColor = colors;
                             seaIceChart.update();
                             currentIndex = index * framesPerYear;
@@ -431,6 +550,8 @@
             showFrame(currentIndex);
             preloadBatch(0);
             updateSpeed(playbackSpeed);
+            updateChartScale();
+            renderChartToYear(currentIndex);
             togglePlay();
         }
 
